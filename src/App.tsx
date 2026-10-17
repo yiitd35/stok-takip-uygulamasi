@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
+import * as XLSX from 'xlsx'
 
 type Product = {
   id: number
@@ -215,6 +216,72 @@ function App() {
     window.setTimeout(() => setNotice(''), 3000)
   }
 
+  function exportProducts() {
+    const rows = products.map((product) => ({
+      'Ürün Adı': product.name,
+      'Stok Kodu': product.sku,
+      'Stok Miktarı': product.stock,
+      Kategoriler: product.categories.join(', '),
+      Birim: product.unit,
+    }))
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Ürünler')
+    XLSX.writeFile(workbook, 'stok-urunleri.xlsx')
+    setNotice('Ürünler Excel dosyasına indirildi.')
+    window.setTimeout(() => setNotice(''), 3000)
+  }
+
+  async function importProducts(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' })
+      const sheet = workbook.Sheets[workbook.SheetNames[0]]
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
+      const imported = rows.map((row, index): Product | null => {
+        const get = (...names: string[]) => {
+          const key = Object.keys(row).find((item) => names.includes(item.trim().toLocaleLowerCase('tr-TR')))
+          return key ? row[key] : ''
+        }
+        const name = String(get('ürün adı', 'urun adi', 'name')).trim()
+        const sku = String(get('stok kodu', 'sku')).trim().toUpperCase()
+        const stock = Number(get('stok miktarı', 'stok miktari', 'stock'))
+        if (!name || !sku || !Number.isFinite(stock) || stock < 0) {
+          console.warn(`Excel satırı atlandı: ${index + 2}`)
+          return null
+        }
+        const categoryValue = String(get('kategoriler', 'kategori', 'categories')).trim()
+        return {
+          id: products.find((product) => product.sku === sku)?.id ?? Date.now() + index,
+          name,
+          sku,
+          categories: categoryValue ? categoryValue.split(',').map((item) => item.trim()).filter(Boolean) : [productCategories[0]],
+          stock,
+          unit: String(get('birim', 'unit')).trim() || 'adet',
+        }
+      }).filter((product): product is Product => product !== null)
+      if (!imported.length) {
+        setNotice('Geçerli ürün satırı bulunamadı.')
+        window.setTimeout(() => setNotice(''), 3000)
+        return
+      }
+      const importedCategories = [...new Set(imported.flatMap((product) => product.categories))]
+      setProductCategories((current) => [...new Set([...current, ...importedCategories])])
+      setProducts((current) => {
+        const bySku = new Map(current.map((product) => [product.sku, product]))
+        imported.forEach((product) => bySku.set(product.sku, product))
+        return [...bySku.values()]
+      })
+      setNotice(`${imported.length} ürün Excel'den aktarıldı.`)
+      window.setTimeout(() => setNotice(''), 3000)
+    } catch (error) {
+      console.error('Excel dosyası okunamadı.', error)
+      setNotice('Excel dosyası okunamadı.')
+      window.setTimeout(() => setNotice(''), 3000)
+    }
+  }
+
   function openAdmin() {
     if (isAdminAuthenticated) {
       setActiveView('admin')
@@ -262,7 +329,7 @@ function App() {
           <div className="stat-card"><div className="stat-icon violet">▤</div><div><p>Toplam Ürün</p><strong>{products.length}</strong><small className="positive">↑ %12.5 <em>geçen aya göre</em></small></div></div>
           <div className="stat-card"><div className="stat-icon green">▥</div><div><p>Toplam Stok</p><strong>{products.reduce((sum, product) => sum + product.stock, 0)}</strong><small className="positive">↑ %8.2 <em>geçen aya göre</em></small></div></div>
           <div className="stat-card"><div className="stat-icon orange">!</div><div><p>Kritik Stok</p><strong>{lowStockCount}</strong><small className="warning">Dikkat gerektiren ürün</small></div></div>
-        </section></> : <section className="admin-page"><div className="page-heading"><div><p className="eyebrow">YÖNETİM PANELİ</p><h1>Stok yönetimi</h1><p className="subtitle">Ürünleri ekleyin, stok miktarlarını güncelleyin veya silin.</p></div><button className="primary-button" onClick={() => setIsModalOpen(true)}><span>＋</span> Yeni Ürün Ekle</button></div><div className="admin-notice"><span>⚿</span><div><strong>Admin yetkisi aktif</strong><p>Ürün, stok, kategori ve fotoğraf düzenlemeleri bu alandan yapılır.</p></div></div><div className="category-manager"><div><strong>Kategoriler</strong><p>Ürünlerde kullanılacak kategorileri yönetin.</p></div><form onSubmit={addCategory}><input value={newCategory} onChange={(event) => setNewCategory(event.target.value)} placeholder="Yeni kategori adı" /><button className="primary-button" type="submit">Ekle</button></form><div className="category-chips">{productCategories.map((item) => <span key={item}>{item}<button type="button" onClick={() => deleteCategory(item)} aria-label={`${item} kategorisini sil`}>×</button></span>)}</div></div><div className="admin-list">{products.map((product) => <div className="admin-row" key={product.id}>{product.image ? <img className="product-image uploaded-image" src={product.image} alt="" /> : <div className={`product-image image-${product.id}`}>{product.categories[0] === 'Gıda' ? '☕' : product.categories[0] === 'Giyim' ? '♧' : product.categories[0] === 'Ev & Yaşam' ? '▱' : '◉'}</div>}<div className="admin-product"><strong>{product.name}</strong><small>{product.sku} · {product.categories.join(', ')}</small></div><label className="stock-input">Stok miktarı<input type="number" min="0" value={product.stock} onChange={(event) => setStock(product.id, event.target.value)} /><span>{product.unit}</span></label><button className="delete-button" onClick={() => deleteProduct(product)} aria-label={`${product.name} ürününü sil`}>Sil</button></div>)}</div></section>}
+        </section></> : <section className="admin-page"><div className="page-heading"><div><p className="eyebrow">YÖNETİCİ PANELİ</p><h1>Stok yönetimi</h1><p className="subtitle">Ürünleri ekleyin, stok miktarlarını güncelleyin veya silin.</p></div><div className="admin-actions"><button className="secondary-button" onClick={exportProducts}>↓ Excel indir</button><label className="secondary-button upload-button">↑ Excel yükle<input type="file" accept=".xlsx,.xls,.csv" onChange={importProducts} /></label><button className="primary-button" onClick={() => setIsModalOpen(true)}><span>＋</span> Yeni Ürün Ekle</button></div></div><div className="admin-notice"><span>⚿</span><div><strong>Admin yetkisi aktif</strong><p>Ürün, stok, kategori ve fotoğraf düzenlemeleri bu alandan yapılır.</p></div></div><div className="category-manager"><div><strong>Kategoriler</strong><p>Ürünlerde kullanılacak kategorileri yönetin.</p></div><form onSubmit={addCategory}><input value={newCategory} onChange={(event) => setNewCategory(event.target.value)} placeholder="Yeni kategori adı" /><button className="primary-button" type="submit">Ekle</button></form><div className="category-chips">{productCategories.map((item) => <span key={item}>{item}<button type="button" onClick={() => deleteCategory(item)} aria-label={`${item} kategorisini sil`}>×</button></span>)}</div></div><div className="admin-list">{products.map((product) => <div className="admin-row" key={product.id}>{product.image ? <img className="product-image uploaded-image" src={product.image} alt="" /> : <div className={`product-image image-${product.id}`}>{product.categories[0] === 'Gıda' ? '☕' : product.categories[0] === 'Giyim' ? '♧' : product.categories[0] === 'Ev & Yaşam' ? '▱' : '◉'}</div>}<div className="admin-product"><strong>{product.name}</strong><small>{product.sku} · {product.categories.join(', ')}</small></div><label className="stock-input">Stok miktarı<input type="number" min="0" value={product.stock} onChange={(event) => setStock(product.id, event.target.value)} /><span>{product.unit}</span></label><button className="delete-button" onClick={() => deleteProduct(product)} aria-label={`${product.name} ürününü sil`}>Sil</button></div>)}</div></section>}
 
         {activeView === 'overview' && <section className="table-card">
           <div className="table-header"><div><h2>Ürünler</h2><p>Stok durumunuzu buradan yönetin.</p></div><div className="filters"><label className="search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ürün ara..." /></label><select value={category} onChange={(event) => setCategory(event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select><button className="filter-button">≡ Filtrele</button></div></div>

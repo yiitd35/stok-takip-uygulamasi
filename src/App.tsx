@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import readXlsxFile, { type Row } from 'read-excel-file/browser'
-import { supabase } from './lib/supabase'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
 
 type Product = {
   id: number
@@ -68,6 +68,11 @@ function App() {
   useEffect(() => {
     let cancelled = false
     async function loadCloudData() {
+      if (!isSupabaseConfigured || !supabase) {
+        setNotice('Bulut bağlantısı yapılandırılmadı; yerel veriler gösteriliyor.')
+        setIsCloudReady(true)
+        return
+      }
       const [{ data: cloudProducts, error: productsError }, { data: cloudCategories, error: categoriesError }] = await Promise.all([
         supabase.from('products').select('id, name, sku, stock, unit, image'),
         supabase.from('categories').select('id, name').order('name'),
@@ -108,19 +113,21 @@ function App() {
 
   useEffect(() => {
     if (!isCloudReady) return
+    if (!isSupabaseConfigured || !supabase) return
+    const cloudClient = supabase
     async function syncCloudData() {
-      const { error: categoryError } = await supabase.from('categories').upsert(productCategories.map((name) => ({ name })), { onConflict: 'name' })
+      const { error: categoryError } = await cloudClient.from('categories').upsert(productCategories.map((name) => ({ name })), { onConflict: 'name' })
       if (categoryError) {
         console.error('Kategoriler buluta kaydedilemedi.', categoryError)
         return
       }
-      const { data: categoryRows, error: categoryReadError } = await supabase.from('categories').select('id, name')
+      const { data: categoryRows, error: categoryReadError } = await cloudClient.from('categories').select('id, name')
       if (categoryReadError) {
         console.error('Kategori kimlikleri okunamadı.', categoryReadError)
         return
       }
       const categoryIds = new Map((categoryRows ?? []).map((item) => [item.name, item.id]))
-      const { error: productError } = await supabase.from('products').upsert(products.map((product) => ({
+      const { error: productError } = await cloudClient.from('products').upsert(products.map((product) => ({
         id: product.id,
         name: product.name,
         sku: product.sku,
@@ -132,13 +139,13 @@ function App() {
         console.error('Ürünler buluta kaydedilemedi.', productError)
         return
       }
-      const { data: cloudProducts } = await supabase.from('products').select('id')
+      const { data: cloudProducts } = await cloudClient.from('products').select('id')
       const activeIds = products.map((product) => product.id)
       const staleIds = (cloudProducts ?? []).map((product) => product.id).filter((id) => !activeIds.includes(Number(id)))
-      if (staleIds.length > 0) await supabase.from('products').delete().in('id', staleIds)
-      await supabase.from('product_categories').delete().in('product_id', activeIds.length ? activeIds : [-1])
+      if (staleIds.length > 0) await cloudClient.from('products').delete().in('id', staleIds)
+      await cloudClient.from('product_categories').delete().in('product_id', activeIds.length ? activeIds : [-1])
       const links = products.flatMap((product) => product.categories.map((name) => ({ product_id: product.id, category_id: categoryIds.get(name) })).filter((link): link is { product_id: number, category_id: number } => typeof link.category_id === 'number'))
-      if (links.length > 0) await supabase.from('product_categories').insert(links)
+      if (links.length > 0) await cloudClient.from('product_categories').insert(links)
     }
     void syncCloudData()
   }, [products, productCategories, isCloudReady])
